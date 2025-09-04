@@ -414,3 +414,95 @@
     (asserts! (>= stacks-block-height (get dispute-deadline channel))
       ERR-DISPUTE-ACTIVE
     )
+
+    ;; Execute final fund distribution with safety checks
+    (and
+      (> final-balance-a u0)
+      (try! (as-contract (stx-transfer? final-balance-a tx-sender tx-sender)))
+    )
+    (and
+      (> final-balance-b u0)
+      (try! (as-contract (stx-transfer? final-balance-b tx-sender counterparty)))
+    )
+
+    ;; Close channel permanently
+    (map-set payment-channels channel-key
+      (merge channel {
+        is-active: false,
+        balance-a: u0,
+        balance-b: u0,
+        total-deposited: u0,
+      })
+    )
+
+    (ok true)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Retrieves comprehensive channel information
+(define-read-only (get-channel-state
+    (channel-id (buff 32))
+    (participant-a principal)
+    (participant-b principal)
+  )
+  (map-get? payment-channels {
+    channel-id: channel-id,
+    participant-a: participant-a,
+    participant-b: participant-b,
+  })
+)
+
+;; Checks if a channel is currently active
+(define-read-only (is-channel-active
+    (channel-id (buff 32))
+    (participant-a principal)
+    (participant-b principal)
+  )
+  (match (map-get? payment-channels {
+    channel-id: channel-id,
+    participant-a: participant-a,
+    participant-b: participant-b,
+  })
+    channel (get is-active channel)
+    false
+  )
+)
+
+;; Check counterparty authorization status
+(define-read-only (check-counterparty-authorization
+    (user principal)
+    (counterparty principal)
+  )
+  (match (map-get? authorized-counterparties {
+    user: user,
+    counterparty: counterparty,
+  })
+    entry (get authorized entry)
+    false
+  )
+)
+
+;; Get contract balance (for monitoring)
+(define-read-only (get-contract-balance)
+  (stx-get-balance (as-contract tx-sender))
+)
+
+;; EMERGENCY PROTOCOLS
+
+;; Emergency fund recovery (owner-only) with enhanced security
+(define-public (emergency-fund-recovery)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+
+    (let ((contract-balance (stx-get-balance (as-contract tx-sender))))
+      (and
+        (> contract-balance u0)
+        (try! (as-contract (stx-transfer? contract-balance tx-sender CONTRACT-OWNER)))
+      )
+    )
+
+    (ok true)
+  )
+)
