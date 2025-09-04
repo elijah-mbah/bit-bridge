@@ -99,3 +99,108 @@
     (is-standard counterparty)
   )
 )
+
+;; Check if counterparty is authorized for this transaction
+(define-private (is-authorized-counterparty (counterparty principal))
+  (match (map-get? authorized-counterparties {
+    user: tx-sender,
+    counterparty: counterparty,
+  })
+    entry
+    (get authorized entry)
+    true ;; If no explicit authorization map exists, allow (backward compatibility)
+  )
+)
+
+;; SECURITY UTILITIES
+
+;; Authorize a counterparty for future transactions
+(define-public (authorize-counterparty (counterparty principal))
+  (begin
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+
+    (map-set authorized-counterparties {
+      user: tx-sender,
+      counterparty: counterparty,
+    } {
+      authorized: true,
+      authorized-at: stacks-block-height,
+    })
+
+    (ok true)
+  )
+)
+
+;; Revoke counterparty authorization
+(define-public (revoke-counterparty (counterparty principal))
+  (begin
+    (map-delete authorized-counterparties {
+      user: tx-sender,
+      counterparty: counterparty,
+    })
+    (ok true)
+  )
+)
+
+;; CRYPTOGRAPHIC UTILITIES
+
+(define-private (serialize-uint (value uint))
+  (unwrap-panic (to-consensus-buff? value))
+)
+
+(define-private (create-channel-message
+    (channel-id (buff 32))
+    (balance-a uint)
+    (balance-b uint)
+  )
+  (concat (concat channel-id (serialize-uint balance-a))
+    (serialize-uint balance-b)
+  )
+)
+
+;; Enhanced signature verification with additional checks
+(define-private (verify-channel-signature
+    (message (buff 256))
+    (signature (buff 65))
+    (expected-signer principal)
+  )
+  (and
+    (validate-signature signature)
+    (validate-counterparty expected-signer)
+    ;; TODO: Implement proper ECDSA verification
+    ;; This is a placeholder - in production, use proper cryptographic verification
+    (is-eq tx-sender expected-signer)
+  )
+)
+
+;; CHANNEL MANAGEMENT FUNCTIONS
+
+;; Creates a bidirectional payment channel between two parties
+(define-public (establish-channel
+    (channel-id (buff 32))
+    (counterparty principal)
+    (initial-deposit uint)
+  )
+  (begin
+    ;; Enhanced input validation
+    (asserts! (validate-channel-id channel-id) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-amount initial-deposit) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+    (asserts! (is-authorized-counterparty counterparty) ERR-UNAUTHORIZED)
+
+    ;; Ensure channel doesn't already exist (check both directions)
+    (asserts!
+      (and
+        (is-none (map-get? payment-channels {
+          channel-id: channel-id,
+          participant-a: tx-sender,
+          participant-b: counterparty,
+        }))
+        (is-none (map-get? payment-channels {
+          channel-id: channel-id,
+          participant-a: counterparty,
+          participant-b: tx-sender,
+        }))
+      )
+      ERR-CHANNEL-EXISTS
+    )
