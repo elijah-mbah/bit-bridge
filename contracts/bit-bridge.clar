@@ -309,3 +309,108 @@
       (validate-balance-distribution final-balance-a final-balance-b total-funds)
       ERR-BALANCE-MISMATCH
     )
+
+    ;; Verify signatures from both parties
+    (asserts!
+      (and
+        (verify-channel-signature settlement-message signature-a tx-sender)
+        (verify-channel-signature settlement-message signature-b counterparty)
+      )
+      ERR-INVALID-SIGNATURE
+    )
+
+    ;; Execute final settlement with additional safety checks
+    (and
+      (> final-balance-a u0)
+      (try! (as-contract (stx-transfer? final-balance-a tx-sender tx-sender)))
+    )
+    (and
+      (> final-balance-b u0)
+      (try! (as-contract (stx-transfer? final-balance-b tx-sender counterparty)))
+    )
+
+    ;; Mark channel as closed
+    (map-set payment-channels channel-key
+      (merge channel {
+        is-active: false,
+        balance-a: u0,
+        balance-b: u0,
+        total-deposited: u0,
+      })
+    )
+
+    (ok true)
+  )
+)
+
+;; Initiates unilateral closure with challenge period
+(define-public (initiate-force-close
+    (channel-id (buff 32))
+    (counterparty principal)
+    (claimed-balance-a uint)
+    (claimed-balance-b uint)
+    (state-signature (buff 65))
+  )
+  (let (
+      (channel-key {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: counterparty,
+      })
+      (channel (unwrap! (map-get? payment-channels channel-key) ERR-CHANNEL-NOT-FOUND))
+      (total-funds (get total-deposited channel))
+      (state-message (create-channel-message channel-id claimed-balance-a claimed-balance-b))
+    )
+    ;; Enhanced validation and security checks
+    (asserts! (validate-channel-id channel-id) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-signature state-signature) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+    (asserts! (is-authorized-counterparty counterparty) ERR-UNAUTHORIZED)
+    (asserts! (get is-active channel) ERR-CHANNEL-CLOSED)
+    (asserts!
+      (validate-balance-distribution claimed-balance-a claimed-balance-b
+        total-funds
+      )
+      ERR-BALANCE-MISMATCH
+    )
+
+    ;; Verify initiator's signature on proposed state
+    (asserts! (verify-channel-signature state-message state-signature tx-sender)
+      ERR-INVALID-SIGNATURE
+    )
+
+    ;; Set dispute deadline and proposed final state
+    (map-set payment-channels channel-key
+      (merge channel {
+        dispute-deadline: (+ stacks-block-height DISPUTE-PERIOD),
+        balance-a: claimed-balance-a,
+        balance-b: claimed-balance-b,
+      })
+    )
+
+    (ok (+ stacks-block-height DISPUTE-PERIOD))
+  )
+)
+
+;; Finalizes unilateral closure after dispute period expires
+(define-public (finalize-force-close
+    (channel-id (buff 32))
+    (counterparty principal)
+  )
+  (let (
+      (channel-key {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: counterparty,
+      })
+      (channel (unwrap! (map-get? payment-channels channel-key) ERR-CHANNEL-NOT-FOUND))
+      (final-balance-a (get balance-a channel))
+      (final-balance-b (get balance-b channel))
+    )
+    ;; Enhanced security checks
+    (asserts! (validate-channel-id channel-id) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+    (asserts! (is-authorized-counterparty counterparty) ERR-UNAUTHORIZED)
+    (asserts! (>= stacks-block-height (get dispute-deadline channel))
+      ERR-DISPUTE-ACTIVE
+    )
