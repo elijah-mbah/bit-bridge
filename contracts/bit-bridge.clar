@@ -204,3 +204,108 @@
       )
       ERR-CHANNEL-EXISTS
     )
+
+    ;; Verify sender has sufficient balance
+    (asserts! (>= (stx-get-balance tx-sender) initial-deposit)
+      ERR-INSUFFICIENT-FUNDS
+    )
+
+    ;; Lock initial funds in contract
+    (try! (stx-transfer? initial-deposit tx-sender (as-contract tx-sender)))
+
+    ;; Initialize channel state
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: counterparty,
+    } {
+      total-deposited: initial-deposit,
+      balance-a: initial-deposit,
+      balance-b: u0,
+      is-active: true,
+      dispute-deadline: u0,
+      sequence-number: u0,
+      created-at: stacks-block-height,
+    })
+
+    (ok channel-id)
+  )
+)
+
+;; Adds liquidity to an existing channel
+(define-public (deposit-funds
+    (channel-id (buff 32))
+    (counterparty principal)
+    (deposit-amount uint)
+  )
+  (let (
+      (channel-key {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: counterparty,
+      })
+      (channel (unwrap! (map-get? payment-channels channel-key) ERR-CHANNEL-NOT-FOUND))
+    )
+    ;; Enhanced validation checks
+    (asserts! (validate-channel-id channel-id) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-amount deposit-amount) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+    (asserts! (is-authorized-counterparty counterparty) ERR-UNAUTHORIZED)
+    (asserts! (get is-active channel) ERR-CHANNEL-CLOSED)
+    (asserts! (>= (stx-get-balance tx-sender) deposit-amount)
+      ERR-INSUFFICIENT-FUNDS
+    )
+
+    ;; Check for overflow protection
+    (asserts!
+      (<= (+ (get total-deposited channel) deposit-amount) MAX-CHANNEL-VALUE)
+      ERR-VALUE-TOO-HIGH
+    )
+
+    ;; Transfer additional funds to contract
+    (try! (stx-transfer? deposit-amount tx-sender (as-contract tx-sender)))
+
+    ;; Update channel state with new funds
+    (map-set payment-channels channel-key
+      (merge channel {
+        total-deposited: (+ (get total-deposited channel) deposit-amount),
+        balance-a: (+ (get balance-a channel) deposit-amount),
+      })
+    )
+
+    (ok deposit-amount)
+  )
+)
+
+;; CHANNEL CLOSURE MECHANISMS
+
+;; Cooperative channel closure with dual signatures
+(define-public (close-channel-cooperatively
+    (channel-id (buff 32))
+    (counterparty principal)
+    (final-balance-a uint)
+    (final-balance-b uint)
+    (signature-a (buff 65))
+    (signature-b (buff 65))
+  )
+  (let (
+      (channel-key {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: counterparty,
+      })
+      (channel (unwrap! (map-get? payment-channels channel-key) ERR-CHANNEL-NOT-FOUND))
+      (total-funds (get total-deposited channel))
+      (settlement-message (create-channel-message channel-id final-balance-a final-balance-b))
+    )
+    ;; Comprehensive validation with enhanced security
+    (asserts! (validate-channel-id channel-id) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-signature signature-a) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-signature signature-b) ERR-INVALID-PARAMETERS)
+    (asserts! (validate-counterparty counterparty) ERR-INVALID-COUNTERPARTY)
+    (asserts! (is-authorized-counterparty counterparty) ERR-UNAUTHORIZED)
+    (asserts! (get is-active channel) ERR-CHANNEL-CLOSED)
+    (asserts!
+      (validate-balance-distribution final-balance-a final-balance-b total-funds)
+      ERR-BALANCE-MISMATCH
+    )
